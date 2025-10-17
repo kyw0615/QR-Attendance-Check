@@ -36,6 +36,12 @@
     <div class="stat">윈도 길이: <span id="win">5</span> s</div>
   </div>
 
+  <div class="row stats">
+    <div class="stat">지연 최소: <span id="latMin">0</span> ms</div>
+    <div class="stat">지연 최대: <span id="latMax">0</span> ms</div>
+    <div class="stat">평균 인식 간 딜레이: <span id="gapAvg">0</span> ms</div>
+  </div>
+
   <div class="row" style="font-size:13px; color:#666">
     화면에 보이는 QR에서 <code>TS=</code> 타임스탬프를 읽어 현재 시각과 차이로 지연(ms)을 계산합니다. 네트워크 전송 없음.
   </div>
@@ -51,6 +57,9 @@
   const $lat = document.getElementById('lat');
   const $win = document.getElementById('win');
   const $toggle = document.getElementById('toggle');
+  const $latMin = document.getElementById('latMin');
+  const $latMax = document.getElementById('latMax');
+  const $gapAvg = document.getElementById('gapAvg');
 
   let running = false;
   let stream = null;
@@ -59,6 +68,10 @@
   let successCount = 0;
   let totalCount = 0;
   let latencySamples = [];
+  let started = false;           // 첫 인식 발생 여부
+  let startEpochMs = 0;          // 첫 인식 시각
+  let gaps = [];                 // 성공 간 간격(ms) 샘플
+  let lastDetectEpochMs = 0;     // 마지막 성공 시각(ms)
   const windowSec = 5; // 통계 윈도 길이(초)
   $win.textContent = String(windowSec);
 
@@ -66,9 +79,16 @@
     successCount = 0;
     totalCount = 0;
     latencySamples = [];
+    started = false;
+    startEpochMs = 0;
+    gaps = [];
+    lastDetectEpochMs = 0;
     $fps.textContent = '0';
     $rate.textContent = '0';
     $lat.textContent = '0';
+    $latMin.textContent = '0';
+    $latMax.textContent = '0';
+    $gapAvg.textContent = '0';
   }
 
   async function startCamera() {
@@ -106,11 +126,20 @@
     }
     lastFrameTime = now;
 
-    const rate = totalCount ? (100 * successCount / totalCount) : 0;
+    const denom = started ? Math.max(1, totalCount) : 1; // 시작 전 0으로 나눔 방지
+    const rate = started ? (100 * successCount / denom) : 0;
     $rate.textContent = rate.toFixed(1);
 
-    const avgLat = latencySamples.length ? (latencySamples.reduce((a,b)=>a+b,0) / latencySamples.length) : 0;
+    const latVals = latencySamples.map(s => s.v);
+    const avgLat = latVals.length ? (latVals.reduce((a,b)=>a+b,0) / latVals.length) : 0;
+    const minLat = latVals.length ? Math.min.apply(null, latVals) : 0;
+    const maxLat = latVals.length ? Math.max.apply(null, latVals) : 0;
     $lat.textContent = avgLat.toFixed(1);
+    $latMin.textContent = minLat.toFixed(1);
+    $latMax.textContent = maxLat.toFixed(1);
+
+    const gapAvg = gaps.length ? (gaps.reduce((a,b)=>a+b,0) / gaps.length) : 0;
+    $gapAvg.textContent = gapAvg.toFixed(1);
   }
 
   function pushLatencySample(ms, nowEpochMs) {
@@ -142,9 +171,11 @@
     const img = ctx.getImageData(0, 0, $canvas.width, $canvas.height);
     const result = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
 
-    totalCount += 1;
+    // 첫 인식 전에는 totalCount를 올리지 않다가, 첫 성공 프레임을 기준으로 카운트 시작
     if (result && result.data) {
+      if (!started) { started = true; startEpochMs = Date.now(); totalCount = 0; successCount = 0; latencySamples = []; }
       successCount += 1;
+      totalCount += 1;
       // 박스 시각화
       drawBox(result.location);
       // TS 파싱 및 지연 계산
@@ -153,7 +184,21 @@
         const nowMs = Date.now();
         const latency = Math.max(0, nowMs - ts);
         pushLatencySample(latency, nowMs);
+        // 성공 간 간격 기록(첫 성공 제외)
+        if (lastDetectEpochMs) {
+          const gap = nowMs - lastDetectEpochMs;
+          // 최근 windowSec 초만 유지
+          const cutoff = nowMs - windowSec * 1000;
+          gaps.push(gap);
+          // gaps는 값만 저장하므로 시간 기준으로 정리하려면 크기를 제한
+          // 너무 커지는 것 방지: 최근 500개로 제한
+          if (gaps.length > 500) gaps = gaps.slice(-500);
+        }
+        lastDetectEpochMs = nowMs;
       }
+    } else if (started) {
+      // 시작된 이후에만 실패 프레임 카운트
+      totalCount += 1;
     }
 
     updateStats(now);
