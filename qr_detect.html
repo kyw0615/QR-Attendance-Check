@@ -32,6 +32,7 @@
   <div class="row stats">
     <div class="stat">FPS: <span id="fps">0</span></div>
     <div class="stat">성공률: <span id="rate">0</span>%</div>
+    <div class="stat">성공 카운트: <span id="successCount">0</span></div>
     <div class="stat">평균 지연: <span id="lat">0</span> ms</div>
     <div class="stat">윈도 길이: <span id="win">5</span> s</div>
   </div>
@@ -43,17 +44,15 @@
   </div>
 
   <div class="row" style="font-size:13px; color:#666">
-    화면에 보이는 QR에서 <code>TS=</code> 타임스탬프를 읽어 현재 시각과 차이로 지연(ms)을 계산합니다. 네트워크 전송 없음.
   </div>
 
-  <!-- jsQR: 순수 JS QR 디코더 -->
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <script>
-  // iPhone Safari 친화적 카메라 접근 및 jsQR 기반 디코딩
   const $video = document.getElementById('video');
   const $canvas = document.getElementById('canvas');
   const $fps = document.getElementById('fps');
   const $rate = document.getElementById('rate');
+  const $successCount = document.getElementById('successCount');
   const $lat = document.getElementById('lat');
   const $win = document.getElementById('win');
   const $toggle = document.getElementById('toggle');
@@ -65,8 +64,8 @@
   let stream = null;
   let ctx = null;
   let lastFrameTime = 0;
-  let successCount = 0;
-  let totalCount = 0;
+  let frameSamples = [];         // 각 프레임의 {t: timestamp, success: boolean} - 윈도 내 필터링용
+  let totalSuccessCount = 0;     // 전체 성공 카운트 (측정 시작 후 누적)
   let latencySamples = [];
   let started = false;           // 첫 인식 발생 여부
   let startEpochMs = 0;          // 첫 인식 시각
@@ -76,8 +75,8 @@
   $win.textContent = String(windowSec);
 
   function resetStats() {
-    successCount = 0;
-    totalCount = 0;
+    frameSamples = [];
+    totalSuccessCount = 0;
     latencySamples = [];
     started = false;
     startEpochMs = 0;
@@ -85,6 +84,7 @@
     lastDetectEpochMs = 0;
     $fps.textContent = '0';
     $rate.textContent = '0';
+    $successCount.textContent = '0';
     $lat.textContent = '0';
     $latMin.textContent = '0';
     $latMax.textContent = '0';
@@ -126,9 +126,19 @@
     }
     lastFrameTime = now;
 
-    const denom = started ? Math.max(1, totalCount) : 1; // 시작 전 0으로 나눔 방지
-    const rate = started ? (100 * successCount / denom) : 0;
+    // 윈도 내 프레임 샘플 필터링 (최근 windowSec 초만)
+    const nowMs = Date.now();
+    const cutoff = nowMs - windowSec * 1000;
+    const windowFrames = frameSamples.filter(s => s.t >= cutoff);
+    
+    // 윈도 내 성공률 계산
+    const windowSuccess = windowFrames.filter(s => s.success).length;
+    const windowTotal = windowFrames.length;
+    const rate = windowTotal > 0 ? (100 * windowSuccess / windowTotal) : 0;
     $rate.textContent = rate.toFixed(1);
+
+    // 전체 성공 카운트 표시
+    $successCount.textContent = String(totalSuccessCount);
 
     const latVals = latencySamples.map(s => s.v);
     const avgLat = latVals.length ? (latVals.reduce((a,b)=>a+b,0) / latVals.length) : 0;
@@ -171,34 +181,51 @@
     const img = ctx.getImageData(0, 0, $canvas.width, $canvas.height);
     const result = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
 
-    // 첫 인식 전에는 totalCount를 올리지 않다가, 첫 성공 프레임을 기준으로 카운트 시작
-    if (result && result.data) {
-      if (!started) { started = true; startEpochMs = Date.now(); totalCount = 0; successCount = 0; latencySamples = []; }
-      successCount += 1;
-      totalCount += 1;
-      // 박스 시각화
-      drawBox(result.location);
-      // TS 파싱 및 지연 계산
-      const ts = parseTimestamp(result.data);
-      if (ts) {
-        const nowMs = Date.now();
-        const latency = Math.max(0, nowMs - ts);
-        pushLatencySample(latency, nowMs);
-        // 성공 간 간격 기록(첫 성공 제외)
-        if (lastDetectEpochMs) {
-          const gap = nowMs - lastDetectEpochMs;
-          // 최근 windowSec 초만 유지
-          const cutoff = nowMs - windowSec * 1000;
-          gaps.push(gap);
-          // gaps는 값만 저장하므로 시간 기준으로 정리하려면 크기를 제한
-          // 너무 커지는 것 방지: 최근 500개로 제한
-          if (gaps.length > 500) gaps = gaps.slice(-500);
+    const nowMs = Date.now();
+    const success = !!(result && result.data);
+    
+    // 첫 인식 전에는 카운트하지 않다가, 첫 성공 프레임을 기준으로 카운트 시작
+    if (success && !started) {
+      started = true;
+      startEpochMs = nowMs;
+      frameSamples = [];
+      totalSuccessCount = 0;
+      latencySamples = [];
+      gaps = [];
+      lastDetectEpochMs = 0;
+    }
+
+    if (started) {
+      // 프레임 샘플 저장 (윈도 내 필터링용)
+      frameSamples.push({ t: nowMs, success: success });
+      
+      // 윈도 밖 샘플 제거 (메모리 절약)
+      const cutoff = nowMs - windowSec * 1000;
+      frameSamples = frameSamples.filter(s => s.t >= cutoff);
+
+      if (success) {
+        // 성공 카운트 증가
+        totalSuccessCount += 1;
+        
+        // 박스 시각화
+        drawBox(result.location);
+        
+        // TS 파싱 및 지연 계산
+        const ts = parseTimestamp(result.data);
+        if (ts) {
+          const latency = Math.max(0, nowMs - ts);
+          pushLatencySample(latency, nowMs);
+          
+          // 성공 간 간격 기록(첫 성공 제외)
+          if (lastDetectEpochMs) {
+            const gap = nowMs - lastDetectEpochMs;
+            gaps.push(gap);
+            // 너무 커지는 것 방지: 최근 500개로 제한
+            if (gaps.length > 500) gaps = gaps.slice(-500);
+          }
+          lastDetectEpochMs = nowMs;
         }
-        lastDetectEpochMs = nowMs;
       }
-    } else if (started) {
-      // 시작된 이후에만 실패 프레임 카운트
-      totalCount += 1;
     }
 
     updateStats(now);
@@ -224,7 +251,6 @@
     else { stop(); }
   });
 
-  // iOS: 사용자 제스처 필요로 자동재생 안 되므로 수동 시작
   requestAnimationFrame(loop);
   </script>
 </body>
