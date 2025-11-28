@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>QR Generator (60fps, ECC=M)</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        margin: 0;
+        padding: 0;
+        background: #0b1120;
+        color: #e5e7eb;
+      }
+      header {
+        padding: 16px 24px;
+        background: #020617;
+        border-bottom: 1px solid #1f2937;
+      }
+      main {
+        padding: 24px;
+        max-width: 1100px;
+        margin: 0 auto;
+        display: flex;
+        gap: 24px;
+        align-items: flex-start;
+      }
+      #qrContainer {
+        width: 360px;
+        height: 360px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: radial-gradient(circle at top left, #1d4ed8, #020617);
+        border-radius: 16px;
+        box-shadow: 0 25px 60px rgba(15, 23, 42, 0.9);
+      }
+      #qrContainer canvas {
+        image-rendering: pixelated;
+      }
+      .panel {
+        flex: 1;
+        background: #020617;
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 20px 45px rgba(15, 23, 42, 0.9);
+      }
+      .stat {
+        margin-bottom: 8px;
+        font-size: 14px;
+        color: #9ca3af;
+      }
+      .stat strong {
+        color: #e5e7eb;
+      }
+      #status {
+        margin-top: 12px;
+        font-size: 13px;
+        color: #6b7280;
+      }
+      #startBtn {
+        padding: 10px 16px;
+        border-radius: 999px;
+        border: none;
+        background: #22c55e;
+        color: #022c22;
+        font-weight: 700;
+        cursor: pointer;
+        margin-top: 12px;
+      }
+      #startBtn:disabled {
+        background: #10b98155;
+        cursor: default;
+      }
+      #fpsControl {
+        margin-top: 8px;
+        font-size: 13px;
+        color: #9ca3af;
+      }
+      #fpsSelect {
+        margin-left: 8px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid #374151;
+        background: #020617;
+        color: #e5e7eb;
+        font-size: 13px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 16px;
+        background: #020617;
+        border-radius: 10px;
+        overflow: hidden;
+        font-size: 13px;
+      }
+      th,
+      td {
+        padding: 6px 8px;
+        border-bottom: 1px solid #1f2937;
+        text-align: left;
+      }
+      th {
+        background: #030712;
+        font-weight: 600;
+      }
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+      .risk-normal-row {
+        background-color: rgba(22, 163, 74, 0.18);
+      }
+      .risk-suspect-row {
+        background-color: rgba(234, 179, 8, 0.22);
+      }
+      .risk-high-row {
+        background-color: rgba(220, 38, 38, 0.22);
+      }
+    </style>
+    <!-- QR 코드 생성용 라이브러리 (qrcodejs) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>QR Generator (60fps, ECC=M)</h1>
+      <p>서버에서 받은 암호문(cipher)을 그대로 QR 텍스트로 사용</p>
+    </header>
+    <main>
+      <div id="qrContainer"></div>
+      <div class="panel">
+        <h2>상태 정보</h2>
+        <div class="stat">
+          <strong>Last token length:</strong>
+          <span id="tokenLen">-</span>
+        </div>
+        <div class="stat">
+          <strong>Last render time (ms):</strong>
+          <span id="renderTime">-</span>
+        </div>
+        <div class="stat">
+          <strong>Frame rate (approx):</strong>
+          <span id="fps">-</span>
+        </div>
+        <div id="fpsControl">
+          목표 FPS:
+          <select id="fpsSelect">
+            <option value="15">15 fps</option>
+            <option value="30">30 fps</option>
+            <option value="60" selected>60 fps</option>
+          </select>
+        </div>
+        <button id="startBtn">Start 60fps QR Stream</button>
+        <div id="status">대기 중...</div>
+        <h3 style="margin-top: 20px; font-size: 14px">최근 출석 인증 로그</h3>
+        <table id="profLogTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Student ID</th>
+              <th>Delta (ms)</th>
+              <th>Risk</th>
+              <th>Label</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </main>
+    <script src="/public/generator.js"></script>
+  </body>
+  </html>
+
+

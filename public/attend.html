@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Attendance Scanner</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        margin: 0;
+        padding: 0;
+        background: #f3f4f6;
+        color: #111827;
+      }
+      header {
+        padding: 16px 24px;
+        background: #111827;
+        color: #e5e7eb;
+      }
+      main {
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      input[type="text"] {
+        padding: 8px 10px;
+        border-radius: 999px;
+        border: 1px solid #d1d5db;
+        min-width: 180px;
+      }
+      button {
+        padding: 8px 16px;
+        border-radius: 999px;
+        border: none;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #startBtn {
+        background: #2563eb;
+        color: white;
+      }
+      #stopBtn {
+        background: #ef4444;
+        color: white;
+      }
+      #videoContainer {
+        width: 100%;
+        margin-bottom: 16px;
+      }
+      video {
+        width: 100%;
+        max-width: 100%;
+        height: auto;
+        background: #000;
+        border-radius: 12px;
+        display: block;
+      }
+      canvas {
+        display: none;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+        background: white;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+      }
+      th,
+      td {
+        padding: 8px 10px;
+        border-bottom: 1px solid #e5e7eb;
+        font-size: 14px;
+        text-align: left;
+      }
+      th {
+        background: #f9fafb;
+        font-weight: 600;
+      }
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+      .risk-normal {
+        background-color: #dcfce7;
+      }
+      .risk-suspect {
+        background-color: #fef9c3;
+      }
+      .risk-high {
+        background-color: #fee2e2;
+      }
+      #status {
+        margin-top: 8px;
+        font-size: 13px;
+        color: #6b7280;
+      }
+    </style>
+    <!-- QR 인식용 라이브러리 (jsQR) -->
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Attendance Scanner</h1>
+      <p>카메라로 QR을 스캔하여 서버 /api/qr 에 인증 요청</p>
+    </header>
+    <main>
+      <div class="controls">
+        <label for="studentId">Student ID:</label>
+        <input id="studentId" type="text" placeholder="학번 입력" />
+        <button id="startBtn">Start Scan</button>
+        <button id="stopBtn">Stop Scan</button>
+      </div>
+      <div id="videoContainer">
+        <video id="video" playsinline></video>
+        <canvas id="canvas"></canvas>
+      </div>
+      <div id="status">대기 중...</div>
+      <table id="resultTable">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Student ID</th>
+            <th>Delta (ms)</th>
+            <th>Risk</th>
+            <th>Label (KR)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </main>
+    <script src="/public/attend.js"></script>
+  </body>
+  </html>
+
+
