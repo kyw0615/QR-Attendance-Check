@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>QR Detect (iPhone)</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 16px; }
+  header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+  #video { width: 100%; max-height: 45vh; background:#000; border-radius: 8px; }
+  #canvas { display:none; }
+  .stats { display:flex; gap:16px; flex-wrap:wrap; font-size:14px; color:#444; }
+  .stat { background:#f5f5f7; padding:8px 12px; border-radius:8px; }
+  .row { margin-top:12px; }
+  button { padding:8px 12px; border:1px solid #ccc; border-radius:8px; background:white; }
+  .ok { color:#0a7; }
+  .warn { color:#d73; }
+  .err { color:#d33; }
+  code { background:#f0f0f0; padding:2px 4px; border-radius:4px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+  <header>
+    <h2 style="margin:0">iPhone QR Detect</h2>
+    <button id="toggle">▶ 시작</button>
+  </header>
+
+  <video id="video" playsinline muted></video>
+  <canvas id="canvas"></canvas>
+
+  <div class="row stats">
+    <div class="stat">FPS: <span id="fps">0</span></div>
+    <div class="stat">성공률: <span id="rate">0</span>%</div>
+    <div class="stat">성공 카운트: <span id="successCount">0</span></div>
+    <div class="stat">평균 지연: <span id="lat">0</span> ms</div>
+    <div class="stat">윈도 길이: <span id="win">5</span> s</div>
+  </div>
+
+  <div class="row stats">
+    <div class="stat">지연 최소: <span id="latMin">0</span> ms</div>
+    <div class="stat">지연 최대: <span id="latMax">0</span> ms</div>
+    <div class="stat">평균 인식 간 딜레이: <span id="gapAvg">0</span> ms</div>
+  </div>
+
+  <div class="row" style="font-size:13px; color:#666">
+    화면에 보이는 QR에서 <code>TS=</code> 타임스탬프를 읽어 현재 시각과 차이로 지연(ms)을 계산합니다. 네트워크 전송 없음.
+  </div>
+
+  <!-- jsQR: 순수 JS QR 디코더 -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script>
+  // iPhone Safari 친화적 카메라 접근 및 jsQR 기반 디코딩
+  const $video = document.getElementById('video');
+  const $canvas = document.getElementById('canvas');
+  const $fps = document.getElementById('fps');
+  const $rate = document.getElementById('rate');
+  const $successCount = document.getElementById('successCount');
+  const $lat = document.getElementById('lat');
+  const $win = document.getElementById('win');
+  const $toggle = document.getElementById('toggle');
+  const $latMin = document.getElementById('latMin');
+  const $latMax = document.getElementById('latMax');
+  const $gapAvg = document.getElementById('gapAvg');
+
+  let running = false;
+  let stream = null;
+  let ctx = null;
+  let lastFrameTime = 0;
+  let frameSamples = [];         // 각 프레임의 {t: timestamp, success: boolean} - 윈도 내 필터링용
+  let totalSuccessCount = 0;     // 전체 성공 카운트 (측정 시작 후 누적)
+  let latencySamples = [];
+  let started = false;           // 첫 인식 발생 여부
+  let startEpochMs = 0;          // 첫 인식 시각
+  let gaps = [];                 // 성공 간 간격(ms) 샘플
+  let lastDetectEpochMs = 0;     // 마지막 성공 시각(ms)
+  const windowSec = 5; // 통계 윈도 길이(초)
+  $win.textContent = String(windowSec);
+
+  function resetStats() {
+    frameSamples = [];
+    totalSuccessCount = 0;
+    latencySamples = [];
+    started = false;
+    startEpochMs = 0;
+    gaps = [];
+    lastDetectEpochMs = 0;
+    $fps.textContent = '0';
+    $rate.textContent = '0';
+    $successCount.textContent = '0';
+    $lat.textContent = '0';
+    $latMin.textContent = '0';
+    $latMax.textContent = '0';
+    $gapAvg.textContent = '0';
+  }
+
+  async function startCamera() {
+    // iPhone 후면 카메라 우선 시도
+    const constraints = {
+      audio: false,
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    $video.srcObject = stream;
+    await $video.play();
+    // 캔버스 초기화
+    $canvas.width = $video.videoWidth;
+    $canvas.height = $video.videoHeight;
+    ctx = $canvas.getContext('2d');
+  }
+
+  function parseTimestamp(text) {
+    // 형식: TS=169xxx;S=.... 또는 TS=169xxx 형태도 허용
+    const m = /TS\s*=\s*(\d{10,20})/.exec(text);
+    if (!m) return null;
+    try { return parseInt(m[1], 10); } catch { return null; }
+  }
+
+  function updateStats(now) {
+    // FPS 계산
+    if (lastFrameTime) {
+      const dt = (now - lastFrameTime) / 1000;
+      const fps = dt > 0 ? (1 / dt) : 0;
+      $fps.textContent = fps.toFixed(1);
+    }
+    lastFrameTime = now;
+
+    // 윈도 내 프레임 샘플 필터링 (최근 windowSec 초만)
+    const nowMs = Date.now();
+    const cutoff = nowMs - windowSec * 1000;
+    const windowFrames = frameSamples.filter(s => s.t >= cutoff);
+    
+    // 윈도 내 성공률 계산
+    const windowSuccess = windowFrames.filter(s => s.success).length;
+    const windowTotal = windowFrames.length;
+    const rate = windowTotal > 0 ? (100 * windowSuccess / windowTotal) : 0;
+    $rate.textContent = rate.toFixed(1);
+
+    // 전체 성공 카운트 표시
+    $successCount.textContent = String(totalSuccessCount);
+
+    const latVals = latencySamples.map(s => s.v);
+    const avgLat = latVals.length ? (latVals.reduce((a,b)=>a+b,0) / latVals.length) : 0;
+    const minLat = latVals.length ? Math.min.apply(null, latVals) : 0;
+    const maxLat = latVals.length ? Math.max.apply(null, latVals) : 0;
+    $lat.textContent = avgLat.toFixed(1);
+    $latMin.textContent = minLat.toFixed(1);
+    $latMax.textContent = maxLat.toFixed(1);
+
+    const gapAvg = gaps.length ? (gaps.reduce((a,b)=>a+b,0) / gaps.length) : 0;
+    $gapAvg.textContent = gapAvg.toFixed(1);
+  }
+
+  function pushLatencySample(ms, nowEpochMs) {
+    // 최근 windowSec 초만 유지
+    const cutoff = nowEpochMs - windowSec * 1000;
+    latencySamples.push({ t: nowEpochMs, v: ms });
+    latencySamples = latencySamples.filter(s => s.t >= cutoff);
+  }
+
+  function drawBox(location) {
+    if (!location) return;
+    ctx.strokeStyle = '#00d084';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(location.topLeftCorner.x, location.topLeftCorner.y);
+    ctx.lineTo(location.topRightCorner.x, location.topRightCorner.y);
+    ctx.lineTo(location.bottomRightCorner.x, location.bottomRightCorner.y);
+    ctx.lineTo(location.bottomLeftCorner.x, location.bottomLeftCorner.y);
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  function loop(now) {
+    if (!running) { requestAnimationFrame(loop); return; }
+    if (!$video.videoWidth) { requestAnimationFrame(loop); return; }
+
+    // 프레임 캡처
+    ctx.drawImage($video, 0, 0, $canvas.width, $canvas.height);
+    const img = ctx.getImageData(0, 0, $canvas.width, $canvas.height);
+    const result = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+
+    const nowMs = Date.now();
+    const success = !!(result && result.data);
+    
+    // 첫 인식 전에는 카운트하지 않다가, 첫 성공 프레임을 기준으로 카운트 시작
+    if (success && !started) {
+      started = true;
+      startEpochMs = nowMs;
+      frameSamples = [];
+      totalSuccessCount = 0;
+      latencySamples = [];
+      gaps = [];
+      lastDetectEpochMs = 0;
+    }
+
+    if (started) {
+      // 프레임 샘플 저장 (윈도 내 필터링용)
+      frameSamples.push({ t: nowMs, success: success });
+      
+      // 윈도 밖 샘플 제거 (메모리 절약)
+      const cutoff = nowMs - windowSec * 1000;
+      frameSamples = frameSamples.filter(s => s.t >= cutoff);
+
+      if (success) {
+        // 성공 카운트 증가
+        totalSuccessCount += 1;
+        
+        // 박스 시각화
+        drawBox(result.location);
+        
+        // TS 파싱 및 지연 계산
+        const ts = parseTimestamp(result.data);
+        if (ts) {
+          const latency = Math.max(0, nowMs - ts);
+          pushLatencySample(latency, nowMs);
+          
+          // 성공 간 간격 기록(첫 성공 제외)
+          if (lastDetectEpochMs) {
+            const gap = nowMs - lastDetectEpochMs;
+            gaps.push(gap);
+            // 너무 커지는 것 방지: 최근 500개로 제한
+            if (gaps.length > 500) gaps = gaps.slice(-500);
+          }
+          lastDetectEpochMs = nowMs;
+        }
+      }
+    }
+
+    updateStats(now);
+    requestAnimationFrame(loop);
+  }
+
+  async function start() {
+    if (running) return;
+    resetStats();
+    await startCamera();
+    running = true;
+    $toggle.textContent = '⏸︎ 정지';
+  }
+
+  function stop() {
+    running = false;
+    $toggle.textContent = '▶ 시작';
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  }
+
+  $toggle.addEventListener('click', async () => {
+    if (!running) { try { await start(); } catch (e) { alert('카메라 권한이 필요합니다: ' + e); } }
+    else { stop(); }
+  });
+
+  // iOS: 사용자 제스처 필요로 자동재생 안 되므로 수동 시작
+  requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
+
