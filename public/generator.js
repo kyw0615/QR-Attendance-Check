@@ -28,18 +28,6 @@ const FRAME_INTERVAL_60 = 1000 / 60;
 // 토큰 갱신 최소 간격 (ms) - 선택된 FPS에 따라 동적으로 계산
 let minTokenInterval = Math.round(1000 / targetFps);
 
-function ensureQrInstance() {
-  if (!qr) {
-    // qrcode.js: correctLevel 옵션으로 ECC 설정
-    qr = new QRCode(qrContainer, {
-      text: "init",
-      width: 320,
-      height: 320,
-      correctLevel: QRCode.CorrectLevel.M, // ECC=M 고정
-    });
-  }
-}
-
 // 브라우저에서 직접 QR 토큰 생성
 // 형식 예: "1:<tsLow-36진수>:<랜덤문자열>"
 function makeLocalToken() {
@@ -56,9 +44,16 @@ async function updateToken() {
     const start = performance.now();
     const cipher = makeLocalToken();
 
-    ensureQrInstance();
-    qr.clear();
-    qr.makeCode(cipher);
+    // show.html과 동일하게 매번 새 인스턴스 생성 (더 안정적)
+    qrContainer.innerHTML = "";
+    qr = new QRCode(qrContainer, {
+      text: cipher,
+      width: 320,
+      height: 320,
+      colorDark: "#000000",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.M, // ECC=M 고정
+    });
 
     const end = performance.now();
     tokenLenEl.textContent = cipher.length.toString();
@@ -128,13 +123,17 @@ function classifyDelta(delta) {
 }
 
 // 교수용: 서버에서 최근 출석 인증 로그를 가져와 테이블에 표시
+// 같은 학번이면 집계하여 하나의 행으로 표시
 async function refreshAttendLog() {
   try {
     const res = await fetch("/api/attend-log");
     if (!res.ok) return;
     const data = await res.json();
     const items = data.items || [];
-    profLogTableBody.innerHTML = "";
+    
+    // 학번별로 데이터 집계
+    const studentData = new Map(); // studentId -> { deltas: [], suspectCount: 0 }
+    
     for (const row of items) {
       // 이 생성 세션에서 만든 토큰만 대상으로 삼는다.
       const createdAt = tokenCreatedAt.get(row.cipher);
@@ -142,24 +141,57 @@ async function refreshAttendLog() {
 
       const delta = row.serverRecvTs - createdAt;
       if (delta < 0) continue; // 시계 차이 등으로 이상하면 스킵
-      const { risk, label } = classifyDelta(delta);
-
+      
+      const studentId = row.studentId;
+      if (!studentData.has(studentId)) {
+        studentData.set(studentId, {
+          deltas: [],
+          suspectCount: 0,
+        });
+      }
+      
+      const student = studentData.get(studentId);
+      student.deltas.push(delta);
+      
+      const { risk } = classifyDelta(delta);
+      if (risk === "suspect" || risk === "high") {
+        student.suspectCount++;
+      }
+    }
+    
+    // 테이블 업데이트: 학번별로 하나의 행만 표시
+    profLogTableBody.innerHTML = "";
+    
+    // 학번별로 정렬 (학번 순서대로)
+    const sortedStudents = Array.from(studentData.entries()).sort((a, b) => 
+      a[0].localeCompare(b[0])
+    );
+    
+    for (const [studentId, data] of sortedStudents) {
+      const deltas = data.deltas;
+      const count = deltas.length;
+      const avgDelta = Math.round(deltas.reduce((a, b) => a + b, 0) / count);
+      const minDelta = Math.min(...deltas);
+      const maxDelta = Math.max(...deltas);
+      const suspectRate = Math.round((data.suspectCount / count) * 100);
+      
+      // 의심률에 따라 행 색상 결정
       const tr = document.createElement("tr");
-      if (risk === "normal") {
+      if (suspectRate === 0) {
         tr.classList.add("risk-normal-row");
-      } else if (risk === "suspect") {
+      } else if (suspectRate < 50) {
         tr.classList.add("risk-suspect-row");
-      } else if (risk === "high") {
+      } else {
         tr.classList.add("risk-high-row");
       }
-      const timeText = row.logTime || "";
+      
       tr.innerHTML = `
-        <td>${row.id}</td>
-        <td>${row.studentId}</td>
-        <td>${delta}</td>
-        <td>${risk}</td>
-        <td>${label}</td>
-        <td>${timeText}</td>
+        <td>${studentId}</td>
+        <td>${count}</td>
+        <td>${avgDelta}</td>
+        <td>${minDelta}</td>
+        <td>${maxDelta}</td>
+        <td>${suspectRate}%</td>
       `;
       profLogTableBody.appendChild(tr);
     }
