@@ -1,8 +1,9 @@
 // generator.js
 // /generator 페이지에서 qrcode.js를 사용해 ECC = M 고정으로 렌더링한다.
-// - QR 토큰은 브라우저에서 직접 생성 (서버에 의존하지 않음)
-// - 학생이 찍은 QR 정보는 서버로 전달된 뒤, /api/attend-log 를 통해 조회
-// - 최종 인증 판정(delta / risk / label)은 이 페이지에서 수행
+// - QR 토큰은 "교수 브라우저에서 직접 AES-256-GCM 으로 암호화"해서 생성한다.
+//   (세션 키는 브라우저 메모리에만 존재하고 서버에는 절대 전달되지 않음)
+// - 학생이 찍은 QR(cipher 문자열)은 서버로 전달되고, 서버는 단순히 로그/중계만 한다.
+// - 최종 인증 판정(delta / risk / label)과, 필요시 복호화/검증은 이 페이지에서 수행한다.
 
 const qrContainer = document.getElementById("qrContainer");
 const tokenLenEl = document.getElementById("tokenLen");
@@ -23,26 +24,104 @@ let lastTokenUpdate = 0;
 let targetFps = 60;
 let consecutiveErrors = 0;
 
+// === 세션별 AES-256-GCM 키 관리 (교수 브라우저 전용) ===
+// - 세션이 시작될 때 32바이트 랜덤 키를 생성하여, 이 페이지 내에서만 사용한다.
+// - 서버는 이 키를 알 수 없으며, 단순히 cipher 문자열을 운반/저장만 한다.
+let sessionAesKeyPromise = null; // Promise<CryptoKey>
+
+function ensureSessionKey() {
+  if (!sessionAesKeyPromise) {
+    const keyBytes = new Uint8Array(32);
+    crypto.getRandomValues(keyBytes);
+    sessionAesKeyPromise = crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "AES-GCM" },
+      false,
+      ["encrypt", "decrypt"]
+    );
+  }
+  return sessionAesKeyPromise;
+}
+
+// 10바이트 payload 생성 (서버의 /api/qr 과 동일한 구조 유지)
+// [0]      : version (1바이트)
+// [1..4]   : tsLow = Date.now() & 0xffffffff (uint32 BE)
+// [5]      : roomCode (1바이트, 예: 1)
+// [6..9]   : randomNonce (4바이트 난수)
+function buildPayload(nowMs) {
+  const payload = new Uint8Array(10);
+  const view = new DataView(payload.buffer);
+
+  const version = 1;
+  const tsLow = (nowMs & 0xffffffff) >>> 0;
+  const roomCode = 1;
+
+  payload[0] = version;
+  // BE로 쓰기
+  view.setUint32(1, tsLow, false);
+  payload[5] = roomCode;
+
+  const nonceBytes = new Uint8Array(4);
+  crypto.getRandomValues(nonceBytes);
+  payload.set(nonceBytes, 6);
+
+  return payload;
+}
+
+function concatUint8Arrays(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 // 기본 FPS 기준: 약 16.67ms 간격 (렌더링 주기)
 const FRAME_INTERVAL_60 = 1000 / 60;
 // 토큰 갱신 최소 간격 (ms) - 선택된 FPS에 따라 동적으로 계산
 let minTokenInterval = Math.round(1000 / targetFps);
 
-// 브라우저에서 직접 QR 토큰 생성
-// 형식 예: "1:<tsLow-36진수>:<랜덤문자열>"
-function makeLocalToken() {
+// 브라우저에서 직접 QR 토큰(cipher) 생성
+// - 서버의 /api/qr 과 동일한 10바이트 payload 구조를 만들고
+// - 이 페이지에서 가지고 있는 세션 키로 AES-256-GCM 암호화한 뒤
+//   iv(12바이트) + ciphertext+authTag 를 base64 로 인코딩한 문자열을 반환한다.
+async function makeLocalToken() {
   const now = Date.now();
-  const tsLow = (now & 0xffffffff) >>> 0;
-  const nonce = Math.random().toString(36).slice(2, 8);
-  const token = `1:${tsLow.toString(36)}:${nonce}`;
-  tokenCreatedAt.set(token, now);
-  return token;
+  const key = await ensureSessionKey();
+
+  const payload = buildPayload(now);
+
+  // GCM 권장 12바이트 IV
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+
+  const ciphertextBuf = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    payload
+  );
+  const ciphertext = new Uint8Array(ciphertextBuf); // 포함된 authTag 포함
+
+  const combined = concatUint8Arrays(iv, ciphertext);
+  const cipherBase64 = bytesToBase64(combined);
+
+  // 생성 시각 기록: cipher 문자열 → 생성된 Date.now()
+  tokenCreatedAt.set(cipherBase64, now);
+  return cipherBase64;
 }
 
 async function updateToken() {
   try {
     const start = performance.now();
-    const cipher = makeLocalToken();
+    const cipher = await makeLocalToken();
 
     // show.html과 동일하게 매번 새 인스턴스 생성 (더 안정적)
     qrContainer.innerHTML = "";
