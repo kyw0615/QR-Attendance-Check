@@ -18,6 +18,9 @@ let qr;
 let running = false;
 // 토큰 생성 시각 기록: cipher 문자열 → 생성된 Date.now()
 const tokenCreatedAt = new Map();
+// 서버/클라이언트 시계 차이(ms). 서버시간 ≈ Date.now() + timeOffsetMs
+let timeOffsetMs = 0;
+
 let lastFpsUpdate = performance.now();
 let frameCount = 0;
 let lastTokenUpdate = 0;
@@ -84,6 +87,28 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+// 서버 시간과 클라이언트 시간 동기화
+async function syncServerTime() {
+  try {
+    const t0 = Date.now();
+    const res = await fetch("/api/server-time");
+    const data = await res.json();
+    const t3 = Date.now();
+
+    const serverTime = data.serverTime;
+    const rtt = t3 - t0;
+    const clientAtServerStamp = t0 + rtt / 2;
+
+    // 서버 시각 - (그때의 클라 시각) = 시계 차이
+    timeOffsetMs = serverTime - clientAtServerStamp;
+    console.log("[TimeSync] offset(ms) =", timeOffsetMs);
+  } catch (e) {
+    console.error("[TimeSync] 서버 시간 동기화 실패", e);
+    // 실패하면 예전처럼 동작
+    timeOffsetMs = 0;
+  }
+}
+
 // 기본 FPS 기준: 약 16.67ms 간격 (렌더링 주기)
 const FRAME_INTERVAL_60 = 1000 / 60;
 // 토큰 갱신 최소 간격 (ms) - 선택된 FPS에 따라 동적으로 계산
@@ -94,7 +119,12 @@ let minTokenInterval = Math.round(1000 / targetFps);
 // - 이 페이지에서 가지고 있는 세션 키로 AES-256-GCM 암호화한 뒤
 //   iv(12바이트) + ciphertext+authTag 를 base64 로 인코딩한 문자열을 반환한다.
 async function makeLocalToken() {
-  const now = Date.now();
+
+  const clientNow = Date.now();
+  // ✅ 서버 기준 현재 시각으로 보정
+  const now = clientNow + timeOffsetMs;
+
+  // const now = Date.now();
   const key = await ensureSessionKey();
 
   const payload = buildPayload(now);
@@ -173,11 +203,27 @@ function renderLoop(now) {
   requestAnimationFrame(renderLoop);
 }
 
-startBtn.addEventListener("click", () => {
+// startBtn.addEventListener("click", () => {
+//   if (running) return;
+//   running = true;
+//   startBtn.disabled = true;
+//   statusEl.textContent = "초기화 중...";
+//   lastFpsUpdate = performance.now();
+//   frameCount = 0;
+//   lastTokenUpdate = 0;
+
+//   // 렌더 루프 시작 (토큰 갱신은 루프 안에서 60fps 기준으로 처리)
+//   requestAnimationFrame(renderLoop);
+// });
+startBtn.addEventListener("click", async () => {
   if (running) return;
   running = true;
   startBtn.disabled = true;
   statusEl.textContent = "초기화 중...";
+
+  // ✅ 토큰 생성 시작 전에 서버와 시계 먼저 맞추기
+  await syncServerTime();
+
   lastFpsUpdate = performance.now();
   frameCount = 0;
   lastTokenUpdate = 0;
