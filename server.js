@@ -66,6 +66,9 @@ app.get("/generator", (req, res) => {
 app.get("/attend", (req, res) => {
   res.sendFile(path.join(publicDir, "attend.html"));
 });
+app.get("/api/server-time", (req, res) => {
+  res.json({ serverTime: Date.now() });
+});
 
 // GET /api/qr
 // - 10바이트 바이너리 payload를 생성 후 AES-256-GCM 으로 암호화
