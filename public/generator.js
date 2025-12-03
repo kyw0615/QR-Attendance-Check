@@ -351,23 +351,31 @@ async function refreshAttendLog() {
       // 학생의 평균이 전체 평균에서 얼마나 벗어났는지 측정
       const studentAvg = studentAvgMap.get(studentId);
       let suspectRate = 0;
-      
+
       if (globalStd > 0) {
-        const zScore = Math.abs((studentAvg - globalMean) / globalStd);
-        
-        // Z-score에 따라 의심률 계산
-        // 0-1: 정상 (0%)
-        // 1-2: 약간 의심 (20-50%)
-        // 2-3: 의심 (50-80%)
-        // 3+: 높은 의심 (80-100%)
-        if (zScore < 1.0) {
+        const diff = studentAvg - globalMean;
+        const absDiff = Math.abs(diff);
+
+        // 1) 평균으로부터 ±50ms 이내는 의심하지 않음 (데드존)
+        if (absDiff <= 50) {
           suspectRate = 0;
-        } else if (zScore < 2.0) {
-          suspectRate = Math.round(20 + (zScore - 1.0) * 30); // 20-50%
-        } else if (zScore < 3.0) {
-          suspectRate = Math.round(50 + (zScore - 2.0) * 30); // 50-80%
         } else {
-          suspectRate = Math.round(80 + Math.min((zScore - 3.0) * 10, 20)); // 80-100%
+          const zScore = Math.abs(diff / globalStd);
+
+          // 2) Z-score 기준을 조금 더 빡세게 조정
+          // - 0~1σ: 0% (데드존 + 거의 정상)
+          // - 1~2σ: 30~70%
+          // - 2~3σ: 70~95%
+          // - 3σ 이상: 95~100%
+          if (zScore < 1.0) {
+            suspectRate = 0;
+          } else if (zScore < 2.0) {
+            suspectRate = Math.round(30 + (zScore - 1.0) * 40); // 30-70%
+          } else if (zScore < 3.0) {
+            suspectRate = Math.round(70 + (zScore - 2.0) * 25); // 70-95%
+          } else {
+            suspectRate = Math.round(95 + Math.min((zScore - 3.0) * 5, 5)); // 95-100%
+          }
         }
       }
       
