@@ -195,14 +195,50 @@ fpsSelect.addEventListener("change", () => {
   statusEl.textContent = `목표 FPS가 ${targetFps}로 설정되었습니다.`;
 });
 
-function classifyDelta(delta) {
-  if (delta < 250) return { risk: "normal", label: "신뢰" };
-  if (delta < 600) return { risk: "suspect", label: "의심" };
-  return { risk: "high", label: "실패" };
+// 통계 기반 이상치 탐지: 평균과 표준편차를 이용하여 이상치 판정
+function calculateMeanStd(values) {
+  if (values.length === 0) return { mean: 0, std: 0 };
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+  const std = Math.sqrt(variance);
+  return { mean, std };
+}
+
+// 이상치를 제외하고 평균 재계산 (반복적으로)
+function calculateRobustMean(studentAverages, thresholdStd = 2.0) {
+  if (studentAverages.length === 0) return { mean: 0, std: 0, included: [] };
+  
+  let currentValues = [...studentAverages];
+  let prevMean = 0;
+  let iterations = 0;
+  const maxIterations = 10;
+  
+  while (iterations < maxIterations) {
+    const { mean, std } = calculateMeanStd(currentValues);
+    
+    // 수렴 확인 (변화가 거의 없으면 종료)
+    if (Math.abs(mean - prevMean) < 0.1) break;
+    
+    // 이상치 제외: 평균에서 thresholdStd * std 이상 벗어난 값 제거
+    const filtered = currentValues.filter(val => {
+      const zScore = Math.abs((val - mean) / (std || 1));
+      return zScore <= thresholdStd;
+    });
+    
+    if (filtered.length === 0 || filtered.length === currentValues.length) break;
+    
+    currentValues = filtered;
+    prevMean = mean;
+    iterations++;
+  }
+  
+  const { mean, std } = calculateMeanStd(currentValues);
+  return { mean, std, included: currentValues };
 }
 
 // 교수용: 서버에서 최근 출석 인증 로그를 가져와 테이블에 표시
 // 같은 학번이면 집계하여 하나의 행으로 표시
+// 통계 기반 이상치 탐지로 의심률 측정
 async function refreshAttendLog() {
   try {
     const res = await fetch("/api/attend-log");
@@ -211,7 +247,7 @@ async function refreshAttendLog() {
     const items = data.items || [];
     
     // 학번별로 데이터 집계
-    const studentData = new Map(); // studentId -> { deltas: [], suspectCount: 0 }
+    const studentData = new Map(); // studentId -> { deltas: [] }
     
     for (const row of items) {
       // 이 생성 세션에서 만든 토큰만 대상으로 삼는다.
@@ -225,18 +261,28 @@ async function refreshAttendLog() {
       if (!studentData.has(studentId)) {
         studentData.set(studentId, {
           deltas: [],
-          suspectCount: 0,
         });
       }
       
       const student = studentData.get(studentId);
       student.deltas.push(delta);
-      
-      const { risk } = classifyDelta(delta);
-      if (risk === "suspect" || risk === "high") {
-        student.suspectCount++;
-      }
     }
+    
+    // 각 학생의 평균 지연시간 계산
+    const studentAverages = [];
+    const studentAvgMap = new Map(); // studentId -> 평균 지연시간
+    
+    for (const [studentId, data] of studentData.entries()) {
+      if (data.deltas.length === 0) continue;
+      const avg = data.deltas.reduce((a, b) => a + b, 0) / data.deltas.length;
+      studentAverages.push(avg);
+      studentAvgMap.set(studentId, avg);
+    }
+    
+    // 이상치를 제외한 강건한 평균 계산 (표준편차 2배 이상 벗어난 값 제외)
+    const robustStats = calculateRobustMean(studentAverages, 2.0);
+    const globalMean = robustStats.mean;
+    const globalStd = robustStats.std;
     
     // 테이블 업데이트: 학번별로 하나의 행만 표시
     profLogTableBody.innerHTML = "";
@@ -249,10 +295,35 @@ async function refreshAttendLog() {
     for (const [studentId, data] of sortedStudents) {
       const deltas = data.deltas;
       const count = deltas.length;
+      if (count === 0) continue;
+      
       const avgDelta = Math.round(deltas.reduce((a, b) => a + b, 0) / count);
       const minDelta = Math.min(...deltas);
       const maxDelta = Math.max(...deltas);
-      const suspectRate = Math.round((data.suspectCount / count) * 100);
+      
+      // 통계 기반 의심률 계산
+      // 학생의 평균이 전체 평균에서 얼마나 벗어났는지 측정
+      const studentAvg = studentAvgMap.get(studentId);
+      let suspectRate = 0;
+      
+      if (globalStd > 0) {
+        const zScore = Math.abs((studentAvg - globalMean) / globalStd);
+        
+        // Z-score에 따라 의심률 계산
+        // 0-1: 정상 (0%)
+        // 1-2: 약간 의심 (20-50%)
+        // 2-3: 의심 (50-80%)
+        // 3+: 높은 의심 (80-100%)
+        if (zScore < 1.0) {
+          suspectRate = 0;
+        } else if (zScore < 2.0) {
+          suspectRate = Math.round(20 + (zScore - 1.0) * 30); // 20-50%
+        } else if (zScore < 3.0) {
+          suspectRate = Math.round(50 + (zScore - 2.0) * 30); // 50-80%
+        } else {
+          suspectRate = Math.round(80 + Math.min((zScore - 3.0) * 10, 20)); // 80-100%
+        }
+      }
       
       // 의심률에 따라 행 색상 결정
       const tr = document.createElement("tr");
