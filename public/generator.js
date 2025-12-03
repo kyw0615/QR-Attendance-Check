@@ -250,36 +250,49 @@ function calculateMeanStd(values) {
   return { mean, std };
 }
 
-// 이상치를 제외하고 평균 재계산 (반복적으로)
-function calculateRobustMean(studentAverages, thresholdStd = 2.0) {
-  if (studentAverages.length === 0) return { mean: 0, std: 0, included: [] };
-  
-  let currentValues = [...studentAverages];
-  let prevMean = 0;
-  let iterations = 0;
-  const maxIterations = 10;
-  
-  while (iterations < maxIterations) {
-    const { mean, std } = calculateMeanStd(currentValues);
-    
-    // 수렴 확인 (변화가 거의 없으면 종료)
-    if (Math.abs(mean - prevMean) < 0.1) break;
-    
-    // 이상치 제외: 평균에서 thresholdStd * std 이상 벗어난 값 제거
-    const filtered = currentValues.filter(val => {
-      const zScore = Math.abs((val - mean) / (std || 1));
-      return zScore <= thresholdStd;
-    });
-    
-    if (filtered.length === 0 || filtered.length === currentValues.length) break;
-    
-    currentValues = filtered;
-    prevMean = mean;
-    iterations++;
+function median(values) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2;
   }
-  
-  const { mean, std } = calculateMeanStd(currentValues);
-  return { mean, std, included: currentValues };
+  return sorted[mid];
+}
+
+// 이상치를 과감하게 제외하고 평균 계산
+// - 전체 분포의 "중심"은 평균이 아니라 median 기반으로 잡는다.
+// - median과 MAD(Median Absolute Deviation)를 이용해 중심 클러스터만 남기고 평균/표준편차 계산.
+function calculateRobustMean(studentAverages) {
+  if (studentAverages.length === 0) return { mean: 0, std: 0, included: [] };
+
+  // 1) 중앙값 기준으로 1차 중심 추정
+  const med = median(studentAverages);
+  const absDeviations = studentAverages.map(v => Math.abs(v - med));
+  const mad = median(absDeviations); // Median Absolute Deviation
+
+  if (mad === 0) {
+    // 모두 거의 같은 값인 경우
+    const { mean, std } = calculateMeanStd(studentAverages);
+    return { mean, std, included: [...studentAverages] };
+  }
+
+  // MAD로부터 표준편차 근사 (정규분포 가정 하에서)
+  const approxStd = 1.4826 * mad;
+
+  // 2) median 기준으로 k * approxStd 이내만 "정상 클러스터"로 취급
+  //    → 멀리 떨어진 애들은 처음부터 평균 계산에 아예 넣지 않는다.
+  const thresholdK = 1.5; // 조금만 벗어나도 과감하게 제외
+  const included = studentAverages.filter(v => Math.abs(v - med) <= thresholdK * approxStd);
+
+  if (included.length === 0) {
+    // 모두 제외돼 버리면, 원본 전체로 fallback
+    const { mean, std } = calculateMeanStd(studentAverages);
+    return { mean, std, included: [...studentAverages] };
+  }
+
+  const { mean, std } = calculateMeanStd(included);
+  return { mean, std, included };
 }
 
 // 교수용: 서버에서 최근 출석 인증 로그를 가져와 테이블에 표시
