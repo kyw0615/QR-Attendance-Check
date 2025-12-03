@@ -325,7 +325,9 @@ async function refreshAttendLog() {
   }
 }
 
-// 1초마다 출석 로그 새로고침
+// 1초마다 출석 로그 새로고침!
 setInterval(refreshAttendLog, 1000);
+
+
 
 
